@@ -1,12 +1,71 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import traceback
 import re
 from openai import OpenAI
 
+# Initialize Ollama Client
 client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+
+
+# Tool A: Keyword Extractor
 def extract_keywords(text):
     return [word.strip(".,!?") for word in text.split() if len(word) > 4]
 
+def spell_check_and_correct(text):
+    """
+    Uses a smaller LLM to detect and correct spelling errors.
+    Returns corrected text and a flag indicating if corrections were made.
+    """
+    try:
+        completion = client.chat.completions.create(
+            model="llama3.2:1b",  # Using a smaller, faster model for spell checking
+            messages=[
+                {
+                    "role": "system", 
+                    "content": """You are an expert spell checker. Your ONLY job is to correct spelling mistakes.
+
+CRITICAL RULES:
+1. ONLY fix obvious spelling errors - do NOT change correctly spelled words
+2. Preserve the original meaning, grammar, and sentence structure exactly
+3. Do NOT rephrase, rewrite, or change the wording
+4. Do NOT change numbers, math expressions, or mathematical operators (+, -, *, /, =)
+5. Do NOT add or remove words
+6. Do NOT change capitalization unless it's clearly wrong
+7. If a word could be spelled multiple ways, choose the most common spelling
+8. If you're unsure about a word, leave it unchanged
+9. Return ONLY the corrected text with no explanations or comments
+10. Do NOT add phrases like "Corrected text:", "Output:", or any prefixes
+
+Examples:
+- Input: "I want to lern about artifical inteligence" 
+  Output: "I want to learn about artificial intelligence"
+- Input: "25+25"
+  Output: "25+25"
+- Input: "What is machine learning?"
+  Output: "What is machine learning?"
+- Input: "Searh for informaton about quantim computing"
+  Output: "Search for information about quantum computing"
+"""
+                },
+                {
+                    "role": "user", 
+                    "content": f"Correct only the spelling errors in this text:\n\n{text}"
+                }
+            ],
+            temperature=0.0,  # Very low temperature for consistent corrections
+            max_tokens=len(text.split()) * 3  # More generous token limit
+        )
+        corrected_text = completion.choices[0].message.content.strip()
+        
+        # Clean up any extra formatting the model might add
+        corrected_text = corrected_text.replace('"', '').replace("'", "'")
+        
+        # Check if corrections were made (case-insensitive comparison)
+        corrections_made = corrected_text.lower().strip() != text.lower().strip()
+        
+        return corrected_text, corrections_made
+        
+    except Exception as e:
+        print(f"Spell check error: {e}")
+        return text, False  # Return original text if spell check fails
 
 # Tool B: Mock Web Search
 def mock_web_search(keywords):
@@ -39,76 +98,48 @@ def evaluate_math_expression(expression):
 def is_math_expression(text):
     return bool(re.fullmatch(r"[\d\s\+\-\*\/\.\(\)]+", text.strip()))
 
-# --- Parallel-safe versions of your tools ---
-def safe_extract_keywords(user_input):
-    try:
-        return extract_keywords(user_input)
-    except Exception:
-        return []  # fallback
 
-def safe_mock_search(keywords):
-    try:
-        return mock_web_search(keywords)
-    except Exception:
-        return "Search failed."
-
-def safe_summarize(text):
-    try:
-        return summarize_with_qwen(text)
-    except Exception:
-        return "Summary generation failed."
-
-def safe_calculate(expression):
-    try:
-        return evaluate_math_expression(expression)
-    except Exception:
-        return "Invalid math expression."
-
-
-# --- Parallel Orchestrator ---
+# Main Orchestrator
 def multi_tool_assistant(user_input):
-    print("User Input:", user_input)
+    print("Original User Input:", user_input)
+    
+    # Spell check first (before any other processing)
+    print("\n🔍 Running spell check...")
+    corrected_input, corrections_made = spell_check_and_correct(user_input)
+    
+    if corrections_made:
+        print(f"✅ Spelling corrections applied:")
+        print(f"   Original: {user_input}")
+        print(f"   Corrected: {corrected_input}")
+    else:
+        print("✅ No spelling errors detected.")
 
     if is_math_expression(user_input):
-        print("🧮 Detected math input. Routing to calculator...")
-        result = safe_calculate(user_input)
-        print("Calculator Result:\n", result)
+        print("🧮 Detected math input. Routing to Calculator.")
+        result = evaluate_math_expression(user_input)
+        print("Tool D - Calculator:\n", result)
         return
+    
+    # Use corrected input for all other processing
+    keywords = extract_keywords(corrected_input)
+    print("Tool A - Extracted Keywords:", keywords)
 
-    results = {}
+    search_results = mock_web_search(keywords)
+    print("Tool B - Search Result:\n", search_results)
 
-    with ThreadPoolExecutor() as executor:
-        # Step 1: Extract Keywords
-        future_keywords = executor.submit(safe_extract_keywords, user_input)
+    summary = summarize_with_qwen(search_results)
+    print("\nTool C - Qwen Summary:\n", summary)
 
-        # Wait for keywords first (used by next step)
-        keywords = future_keywords.result()
 
-        # Step 2 + 3: Run Search and Summary in parallel
-        futures = {
-            'search': executor.submit(safe_mock_search, keywords),
-        }
-
-        # Optional: Pre-summarize the user query as fallback (if needed)
-        if keywords:
-            search_result = futures['search'].result()
-            futures['summary'] = executor.submit(safe_summarize, search_result)
-
-        # Collect Results
-        for name, future in futures.items():
-            try:
-                results[name] = future.result()
-            except Exception as e:
-                print(f"[{name.upper()} ERROR] {e}")
-                results[name] = f"{name} failed."
-
-    # Final Output
-    if 'summary' in results:
-        print("\nQwen Summary:\n", results['summary'])
-    else:
-        print("\nNo summary generated.")
-    print("\nSearch Result:\n", results.get('search'))
-
+# Run Demo
 if __name__ == "__main__":
-    user_query = "25+25"
-    multi_tool_assistant(user_query)
+    examples = [
+        # "Tell me about the impact of solar power on rural communities.",
+        #  "25*(3+7)",
+        # "I want to lern about artifical inteligence",  # Test with spelling errors
+        # "Searh for informaton about quantim computing",  # Test with more errors
+        "What is the lrgest planet in Soler System?"
+    ]
+    for query in examples:
+        print("\n" + "="*50)
+        multi_tool_assistant(query)
